@@ -1,0 +1,269 @@
+<html>
+  <head>
+    <style>
+      button {
+        margin: 10px;
+      }
+
+      label, textarea {
+        display: block;
+      }
+
+      .flex {
+        height: 70%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .just-flex {
+        display: flex;
+      }
+
+      .flex-column {
+        flex-direction: column;
+      }
+
+      .screen-reader {
+        clip: rect(1px, 1px, 1px, 1px);
+        clip-path: inset(50%);
+        height: 1px;
+        width: 1px;
+        margin: -1px;
+        overflow: hidden;
+        padding: 0;
+        position: absolute;
+      }
+
+      .full-min-width {
+        width: 100%;
+        min-width: 185px;
+      }
+
+      .flex-grow {
+        flex-grow: 1;
+      }
+
+      .margin-right {
+        margin-right: 5px;
+      }
+    </style>
+  </head>
+
+  <body>
+    <main>
+      <div class="flex flex-column" id="splash">
+        <button type="button" onclick="create();">Create Chat</button>
+        <button type="button" onclick="join();">Join Chat</button>
+      </div>
+    </main>
+
+    <template id="form-for-create">
+      <div class="flex" id="create">
+          <form onsubmit="onCreateSubmit(...arguments);">
+            <fieldset>
+              <legend>Create Chat</legend>
+              <label for="your-id">1.) Send ID to friend</label>
+              <input id="your-id" type="text" autofocus readonly/>
+              <label for="friend-id">2.) Submit your friend's ID</label>
+              <input id="friend-id" type="text" autocomplete="off" placeholder="{ &#8230 }" required/>
+              <input type="submit"/>
+            </fieldset>
+          </form>
+      </div>
+    </template>
+
+    <template id="form-for-joiner">
+      <div class="flex" id="join">
+        <form onsubmit="onJoinSubmit(...arguments);">
+          <fieldset>
+            <legend>Join Chat</legend>
+            <label for="friend-id">1.) Submit your friend's ID</label>
+            <input id="friend-id" type="text" autocomplete="off" placeholder="{ &#8230 }" required autofocus/>
+            <input type="submit"/>
+            <label for="your-id">2.) Send ID to friend</label>
+            <input id="your-id" type="text" readonly/>
+          </fieldset>
+        </form>
+      </div>
+    </template>
+
+    <template id="form-for-chat">
+      <div class="flex">
+        <form onsubmit="onChatSubmit(...arguments);">
+          <fieldset>
+            <legend>Chat away!!</legend>
+            <label class="screen-reader" for="chat">Read-only dialogue box</label>
+            <textarea class="full-min-width" id="chat" rows="10" placeholder="Someone say something&#8230" readonly></textarea>
+
+            <br/>
+
+            <div class="full-min-width just-flex">
+              <label class="screen-reader" for="chat-input">Chat input box</label>
+              <input class="flex-grow margin-right" type="text" id="chat-input" autocomplete="off" maxlength="300" required autofocus/>
+              <input type="submit"/>
+            </div>
+          </fieldset>
+        </form>
+      </div>
+    </template>
+
+    <script>
+      // Welcome to yet-another-serverless-chat app, courtesy of WebRTC!
+      // This is a little reference I made to talk myself through how WebRTC works with arbitrary data.
+      // Before we execute the different connection logics, let some up some boilerplate stuff.
+
+      // Lets not populate the global scope unless we need to - so we wrap in a function & call it.
+      (() => {
+        // A connection beween a peer is represented by RTCPeerConnection, so we start here.
+        // https://developer.mozilla.org/en-US/docs/Web/API/WebRTC_API
+        const RTCPeerConnection = window.RTCPeerConnection || window.webkitRTCPeerConnection || window.mozRTCPeerConnection;
+
+        // Use a public STUN server, for letting the local peer know how itself "looks"
+        // to the outside world. This is essentially providing a conduit for making the
+        // creator and joiner understand how to find eachother.
+        // If we were communicating solely to peers inside a network, we may not need to query a STUN server.
+        // See references to understand why we need this, and why "true" peer to peer doesn't just..work much of the time.
+        // https://developer.mozilla.org/en-US/docs/Web/API/WebRTC_API/Protocols#STUN
+        // https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection
+        const STUN_SERVER = 'stun:stun.l.google.com:19302';
+        const STUN_SERVER_2 = 'stun:stun.l.google.com:19305';
+
+        // The creator and the joiner of the chat both need to make the RTCPeerConnection,
+        // so we do this irrespective of if we're "creating" the connection,
+        // or simply joining an existing connection.
+        const rtcPeerConnection = new RTCPeerConnection({
+          iceServers: [
+            { url: STUN_SERVER },
+            { url: STUN_SERVER_2 }
+          ]
+        });
+
+        // Simple DOM helper function to render new <template> in place of old selector
+        const render = (newTemplateSelector, selectorToReplace = '#switch') => {
+          const oldNode = document.querySelector(selectorToReplace);
+          const newNode = document.querySelector(newTemplateSelector);
+          const adoptedNode = document.adoptNode(newNode).content;
+
+          document.querySelector('main').replaceChild(adoptedNode, oldNode);
+        };
+
+        let isCreator; // Flag indicating if user is chat creator/initializer - or else, user is joiner
+        let rtcDataChannel; // Datachannel reference from RTCPeerConnection, for sending  messages & receiving
+
+        // Callback consumed by the RTCDataChannel - this callback receives messages from other peers
+        const onMessage = (e) => {
+          const textNode = document.createTextNode(e.data);
+          const textArea = document.querySelector('textarea');
+
+          textArea.appendChild(textNode);
+          textArea.scrollTop = textArea.scrollHeight;
+        }
+        // TODO - const onclose = onDataChannelClose;
+
+        // Callback consumed by the RTCPeerConnection when creating descriptors
+        const onIceCandidate = (iceCandidateEvent) => {
+          // This keeps getting called with connection candidates, but when its null, that means there are no
+          // more candidates
+          if (iceCandidateEvent.candidate) return;
+          // LocalDescription is fully populated once the ice candidate events stop occuring
+          document.querySelector('input#your-id').value = JSON.stringify(rtcPeerConnection.localDescription);
+        }
+
+        // Now that we've initialized all our global states and re-usable callbacks, lets hook up the corresponding
+        // code for both the "Creator" of the chat, and the "Joiner" of the chat.
+
+        // [STEP 1 - Creator] The initializer wants to create a chat. So the initalizer sends
+        // this descriptor information (manually) to the peer (the information is provided by STUN).
+        window.create = () => {
+          isCreator = true;
+
+          render('#form-for-create', '#splash');
+          // Create a data channel for transferring arbitrary data
+          // (WebRTC supports a lot of cool stuff like video, audio, etc)
+          rtcDataChannel = rtcPeerConnection.createDataChannel('dataChannel');
+
+          rtcDataChannel.onopen = () => { render('#form-for-chat', '#create'); }
+          rtcDataChannel.onmessage = onMessage;
+
+          rtcPeerConnection.onicecandidate = onIceCandidate;
+
+          rtcPeerConnection.createOffer()
+            .then((desc) => rtcPeerConnection.setLocalDescription(desc))
+            .catch((err) => console.error(err));
+        }
+
+        // [STEP 2 - Joiner] Basically a no-op. The joiner simply clicks "join", but only the UI changes.
+        // This is because the joiner needs to submit the initializers descriptors before the joiner
+        // can actually do any sort of RTCPeerConnection logic. So we simply expose the form.
+        window.join = () => {
+          render('#form-for-joiner', '#splash');
+        }
+
+        // [STEP 3 - Joiner] The joiner of the chat inputs the initializers descriptors. After they do this,
+        // the joiner can now set up a "counteroffer" (actually called an "answer") descriptor.
+        // Now, the joiner needs to send this descriptor back to the initializer (manually).
+        window.onJoinSubmit = (event) => {
+          event.preventDefault();
+          // Hook up a callback for when the data channel (made by the "create()" peer) is opened
+          rtcPeerConnection.ondatachannel = (e) => {
+            rtcDataChannel = e.channel;
+            rtcDataChannel.onopen = () => { render('#form-for-chat', '#join'); }
+            rtcDataChannel.onmessage = onMessage;
+          };
+
+          rtcPeerConnection.onicecandidate = onIceCandidate;
+
+          const offer = JSON.parse(document.querySelector('input#friend-id').value);
+
+          rtcPeerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+          rtcPeerConnection.createAnswer()
+            .then((answerDesc) => rtcPeerConnection.setLocalDescription(answerDesc))
+            .catch((err) => console.warn("Couldn't create answer"));
+        }
+
+        // [STEP 4 - Creator] The final step. The initializer of the chat inputs the peers remote description counteroffer.
+        // If everything actually works and the two peers negotiate a successful connection, then the data channel
+        // should be open now.
+        window.onCreateSubmit = (event) => {
+          event.preventDefault();
+
+          const remoteDescription = JSON.parse(document.querySelector('input#friend-id').value);
+
+          rtcPeerConnection.setRemoteDescription(new RTCSessionDescription(remoteDescription));
+        }
+
+        // [STEP 5 - Chat :)] This is the bonus step - both creator and joiner send messages through this function!
+        window.onChatSubmit = (event) => {
+          event.preventDefault();
+          const input = document.querySelector('input#chat-input')
+
+          try {
+            const textToSend = (isCreator ? 'Creator: ' : 'Joiner: ') + input.value + '\n\r';
+            // Exceptions can be thrown for things like network error:
+            // https://developer.mozilla.org/en-US/docs/Web/API/RTCDataChannel/send
+            rtcDataChannel.send(textToSend);
+            const textNode = document.createTextNode(textToSend);
+            const textArea = document.querySelector('textarea');
+
+            textArea.appendChild(textNode);
+            textArea.scrollTop = textArea.scrollHeight;
+            input.value = '';
+          } catch {
+            // TODO introduce error states like this one
+          }
+        }
+      })();
+
+      // Thats it! Thanks for following along. Here's some references I used:
+      //
+      // https://blog.sessionstack.com/how-javascript-works-webrtc-and-the-mechanics-of-peer-to-peer-connectivity-87cc56c1d0ab?gi=139867e9ace
+      // https://www.html5rocks.com/en/tutorials/webrtc/infrastructure/
+      // https://developer.mozilla.org/en-US/docs/Web/API/WebRTC_API/Simple_RTCDataChannel_sample
+      //
+      // Here's some other serverless chat apps:
+      // https://github.com/owebio/serverless-webrtc-chat
+      // https://github.com/cjb/serverless-webrtc
+    </script>
+  </body>
+</html>
